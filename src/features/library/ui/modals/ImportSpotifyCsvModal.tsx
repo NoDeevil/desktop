@@ -109,9 +109,9 @@ export default function ImportSpotifyCsvModal() {
           type="button"
           variant="primary"
           size="sm"
-          disabled={phase !== "ready" && !running}
+          disabled={phase === "idle"}
           onClick={() => (running ? stop() : void run())}
-          className={`w-full !rounded-md ${running ? "pointer-events-none" : ""}`}
+          className="w-full !rounded-md"
         >
           {running ? t("common.spotify_csv_stop") : phase === "done" ? t("common.spotify_csv_rerun") : t("common.import_likes")}
         </Button>

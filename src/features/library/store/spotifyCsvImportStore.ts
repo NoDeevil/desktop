@@ -56,11 +56,12 @@ async function fetchLikedIds(): Promise<Set<string>> {
   return ids;
 }
 
-async function withRetry<T>(action: () => Promise<T>): Promise<T> {
+async function withRetry<T>(action: () => Promise<T>, shouldStop?: () => boolean): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await action();
     } catch (err) {
+      if (shouldStop?.()) throw err;
       const status = err instanceof ApiError ? err.status : 0;
       const transient = status === 429 || status >= 500 || status === 0;
       if (transient && attempt < 4) {
@@ -88,18 +89,20 @@ function searchCandidates(row: SpotifyCsvRow): Promise<MatchCandidate[]> {
   );
 }
 
+// the best candidate is the best confident one — a higher raw score that
+// fails the title/artist gates must not steal the match from a candidate
+// that actually passes them
 function bestMatch(row: SpotifyCsvRow, candidates: MatchCandidate[]): { candidate: MatchCandidate | null; confident: boolean } {
-  let best: { candidate: MatchCandidate | null; score: ReturnType<typeof scoreMatch> } = {
-    candidate: null,
-    score: { overall: 0, title: 0, artist: 0 },
-  };
+  let best: { candidate: MatchCandidate; score: ReturnType<typeof scoreMatch> } | null = null;
+  const rowHasArtist = Boolean(row.artist);
   for (const candidate of candidates) {
     const score = scoreMatch(row, candidate);
-    if (score.overall > best.score.overall) {
+    if (!isConfidentMatch(score, rowHasArtist)) continue;
+    if (!best || score.overall > best.score.overall) {
       best = { candidate, score };
     }
   }
-  return { candidate: best.candidate, confident: Boolean(best.candidate) && isConfidentMatch(best.score, Boolean(row.artist)) };
+  return { candidate: best?.candidate ?? null, confident: best !== null };
 }
 
 export const useSpotifyCsvImportStore = create<SpotifyCsvImportState>((set, get) => ({
@@ -137,8 +140,12 @@ export const useSpotifyCsvImportStore = create<SpotifyCsvImportState>((set, get)
 
   run: async () => {
     const { rows, phase } = get();
-    if (phase !== "ready" || rows.length === 0) return;
-    set({ phase: "running", stopRequested: false });
+    if ((phase !== "ready" && phase !== "done") || rows.length === 0) return;
+    set({
+      phase: "running",
+      stopRequested: false,
+      progress: { total: rows.length, done: 0, liked: 0, skipped: 0, failed: 0, current: "" },
+    });
 
     const progress = { ...get().progress };
 
@@ -161,12 +168,17 @@ export const useSpotifyCsvImportStore = create<SpotifyCsvImportState>((set, get)
           progress.current = `${row.artist ? `${row.artist} — ` : ""}${row.title}`;
 
           try {
-            const { candidate, confident } = bestMatch(row, await searchCandidates(row));
+            const stopRequested = () => get().stopRequested;
+            const { candidate, confident } = bestMatch(
+              row,
+              await withRetry(() => searchCandidates(row), stopRequested),
+            );
+            if (stopRequested()) return;
             if (candidate && confident) {
               if (likedIds.has(candidate.id)) {
                 progress.skipped++;
               } else {
-                await withRetry(() => api.likeTrack(candidate.id));
+                await withRetry(() => api.likeTrack(candidate.id), stopRequested);
                 likedIds.add(candidate.id);
                 progress.liked++;
               }
@@ -174,7 +186,7 @@ export const useSpotifyCsvImportStore = create<SpotifyCsvImportState>((set, get)
               progress.failed++;
             }
           } catch {
-            progress.failed++;
+            if (!get().stopRequested) progress.failed++;
           }
 
           progress.done++;

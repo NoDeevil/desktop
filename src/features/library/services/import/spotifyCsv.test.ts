@@ -80,7 +80,39 @@ describe("match scoring", () => {
     expect(
       looksLikeStub({ id: "1", title: "Unknown Title", artists: "Unknown Artist" }),
     ).toBe(true);
+    expect(looksLikeStub({ id: "1", title: "", artists: "" })).toBe(true);
     expect(looksLikeStub({ id: "1", title: "Space Song", artists: "Beach House" })).toBe(false);
+  });
+
+  it("does not treat real songs containing 'unknown' as stubs", () => {
+    expect(looksLikeStub({ id: "1", title: "Into the Unknown", artists: "Aurora" })).toBe(false);
+    expect(
+      looksLikeStub({ id: "1", title: "Needed", artists: "Unknown Mortal Orchestra" }),
+    ).toBe(false);
+  });
+
+  it("requires tokens to match as whole words", () => {
+    const row = { title: "Run", artist: "Collective Member" };
+    const candidate = {
+      id: "1",
+      title: "Running Up That Hill",
+      artists: "Collective Member",
+    };
+    expect(scoreMatch(row, candidate).title).toBe(0);
+  });
+
+  it("matches titles that consist only of a year or filler word", () => {
+    const row = { title: "1999", artist: "Prince" };
+    const candidate = { id: "1", title: "1999", artists: "Prince" };
+    expect(isConfidentMatch(scoreMatch(row, candidate), true)).toBe(true);
+  });
+
+  it("scores non-latin titles instead of dropping them", () => {
+    const row = { title: "Потеряла голову", artist: "HANNA" };
+    const candidate = { id: "1", title: "Потеряла голову", artists: "HANNA" };
+    const score = scoreMatch(row, candidate);
+    expect(score.title).toBe(1);
+    expect(isConfidentMatch(score, true)).toBe(true);
   });
 
   it("joins artist names from either shape the api returns", () => {

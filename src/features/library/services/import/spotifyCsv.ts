@@ -30,25 +30,27 @@ function normalize(value: string): string {
   return value
     .toLowerCase()
     .replace(/\(.*?\)|\[.*?\]/g, " ")
-    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function tokens(value: string): string[] {
-  return normalize(value)
-    .split(" ")
-    .filter(Boolean)
-    .filter((token) => !FILLER_TOKEN.test(token) && !/^\d{4}$/.test(token));
+  const all = normalize(value).split(" ").filter(Boolean);
+  const filtered = all.filter(
+    (token) => !FILLER_TOKEN.test(token) && !/^\d{4}$/.test(token),
+  );
+  // a title that consists only of a year or filler words still deserves a match
+  return filtered.length > 0 ? filtered : all;
 }
 
 function tokenScore(query: string, target: string): number {
   const queryTokens = tokens(query);
-  const haystack = tokens(target).join(" ");
-  if (queryTokens.length === 0 || !haystack) return 0;
+  const targetTokens = new Set(tokens(target));
+  if (queryTokens.length === 0 || targetTokens.size === 0) return 0;
   let hits = 0;
   for (const token of queryTokens) {
-    if (haystack.includes(token)) hits++;
+    if (targetTokens.has(token)) hits++;
   }
   return hits / queryTokens.length;
 }
@@ -63,12 +65,15 @@ export function artistNamesOf(candidate: MatchCandidate): string {
   return "";
 }
 
-// catalog placeholders are never a real match
+// catalog placeholders are never a real match — whole values only, so that
+// titles like "Into the Unknown" or the artist "Unknown Mortal Orchestra"
+// are not caught
+function isPlaceholder(value: string): boolean {
+  return /^(unknown|unknown title|unknown artist|n\/?a|not found|)\s*$/i.test(value.trim());
+}
+
 export function looksLikeStub(candidate: MatchCandidate): boolean {
-  return (
-    /unknown|n\/a|^\s*$|not found/i.test(candidate.title ?? "") ||
-    /unknown|n\/a/i.test(artistNamesOf(candidate))
-  );
+  return isPlaceholder(candidate.title ?? "") || isPlaceholder(artistNamesOf(candidate));
 }
 
 export function scoreMatch(row: SpotifyCsvRow, candidate: MatchCandidate): MatchScore {
