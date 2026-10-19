@@ -36,10 +36,19 @@ interface SpotifyCsvImportState {
   reset: () => void;
 }
 
-// two workers with a small floor between request starts keeps the run quick
-// without hammering the api
+// two workers pull rows while one shared scheduler spaces out request
+// starts, so searches, likes and retries together stay under one pace
 const WORKER_COUNT = 2;
 const PACE_MS = 450;
+
+let nextRequestAt = 0;
+async function paced<T>(action: () => Promise<T>): Promise<T> {
+  const now = Date.now();
+  const wait = Math.max(0, nextRequestAt - now);
+  nextRequestAt = Math.max(now, nextRequestAt) + PACE_MS;
+  if (wait > 0) await sleep(wait);
+  return action();
+}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -163,7 +172,6 @@ export const useSpotifyCsvImportStore = create<SpotifyCsvImportState>((set, get)
           const index = nextIndex++;
           if (index >= rows.length) break;
           const row = rows[index];
-          const startedAt = Date.now();
 
           progress.current = `${row.artist ? `${row.artist} — ` : ""}${row.title}`;
 
@@ -171,14 +179,14 @@ export const useSpotifyCsvImportStore = create<SpotifyCsvImportState>((set, get)
             const stopRequested = () => get().stopRequested;
             const { candidate, confident } = bestMatch(
               row,
-              await withRetry(() => searchCandidates(row), stopRequested),
+              await withRetry(() => paced(() => searchCandidates(row)), stopRequested),
             );
             if (stopRequested()) return;
             if (candidate && confident) {
               if (likedIds.has(candidate.id)) {
                 progress.skipped++;
               } else {
-                await withRetry(() => api.likeTrack(candidate.id), stopRequested);
+                await withRetry(() => paced(() => api.likeTrack(candidate.id)), stopRequested);
                 likedIds.add(candidate.id);
                 progress.liked++;
               }
@@ -191,9 +199,6 @@ export const useSpotifyCsvImportStore = create<SpotifyCsvImportState>((set, get)
 
           progress.done++;
           set({ progress: { ...progress } });
-
-          const wait = PACE_MS - (Date.now() - startedAt);
-          if (wait > 0) await sleep(wait);
         }
       };
 
