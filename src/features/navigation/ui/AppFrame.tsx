@@ -48,6 +48,7 @@ import {
   RemoveFromPlaylistModal,
   RemoveFromLibraryModal,
   ImportLikesModal,
+  ImportSpotifyCsvModal,
   ImportReviewModal,
   CreatePlaylistModal,
   useModalStore,
@@ -1063,6 +1064,7 @@ export default function AppFrame({ children }: AppFrameProps) {
       <RemoveFromPlaylistModal />
       <RemoveFromLibraryModal />
       <ImportLikesModal />
+      <ImportSpotifyCsvModal />
       <CreatePlaylistModal />
       <ImportReviewModal />
       <SettingsModal />
