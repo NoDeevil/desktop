@@ -41,22 +41,34 @@ interface SpotifyCsvImportState {
 const WORKER_COUNT = 2;
 const PACE_MS = 450;
 
+const STOP = new Error("csv import stopped");
+
 let nextRequestAt = 0;
-async function paced<T>(action: () => Promise<T>): Promise<T> {
-  const now = Date.now();
-  const wait = Math.max(0, nextRequestAt - now);
-  nextRequestAt = Math.max(now, nextRequestAt) + PACE_MS;
-  if (wait > 0) await sleep(wait);
+// reserves slots on the shared schedule, waits for its turn and then runs the
+// action — stopping during the wait cancels the action before it starts.
+// `slots` covers calls that fan out into more than one backend request.
+async function paced<T>(
+  action: () => Promise<T>,
+  shouldStop: () => boolean,
+  slots = 1,
+): Promise<T> {
+  for (let i = 0; i < slots; i++) {
+    const now = Date.now();
+    const wait = Math.max(0, nextRequestAt - now);
+    nextRequestAt = Math.max(now, nextRequestAt) + PACE_MS;
+    if (wait > 0) await sleep(wait);
+    if (shouldStop()) throw STOP;
+  }
   return action();
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function fetchLikedIds(): Promise<Set<string>> {
+async function fetchLikedIds(shouldStop: () => boolean): Promise<Set<string>> {
   const ids = new Set<string>();
   let cursor: string | undefined;
   do {
-    const page = await api.listLikedTracks(100, cursor);
+    const page = await paced(() => api.listLikedTracks(100, cursor), shouldStop);
     for (const item of page.items ?? []) {
       if (item.track?.id) ids.add(item.track.id);
     }
@@ -159,10 +171,12 @@ export const useSpotifyCsvImportStore = create<SpotifyCsvImportState>((set, get)
     const progress = { ...get().progress };
 
     try {
+      const stopRequested = () => get().stopRequested;
       let likedIds: Set<string>;
       try {
-        likedIds = await fetchLikedIds();
-      } catch {
+        likedIds = await fetchLikedIds(stopRequested);
+      } catch (err) {
+        if (err === STOP) return;
         likedIds = new Set();
       }
 
@@ -176,25 +190,29 @@ export const useSpotifyCsvImportStore = create<SpotifyCsvImportState>((set, get)
           progress.current = `${row.artist ? `${row.artist} — ` : ""}${row.title}`;
 
           try {
-            const stopRequested = () => get().stopRequested;
             const { candidate, confident } = bestMatch(
               row,
-              await withRetry(() => paced(() => searchCandidates(row)), stopRequested),
+              await withRetry(() => paced(() => searchCandidates(row), stopRequested), stopRequested),
             );
             if (stopRequested()) return;
             if (candidate && confident) {
               if (likedIds.has(candidate.id)) {
                 progress.skipped++;
               } else {
-                await withRetry(() => paced(() => api.likeTrack(candidate.id)), stopRequested);
+                // one slot for the catalog snapshot the like resolves
+                // internally, one for the put itself
+                await withRetry(
+                  () => paced(() => api.likeTrack(candidate.id), stopRequested, 2),
+                  stopRequested,
+                );
                 likedIds.add(candidate.id);
                 progress.liked++;
               }
             } else {
               progress.failed++;
             }
-          } catch {
-            if (!get().stopRequested) progress.failed++;
+          } catch (err) {
+            if (err !== STOP && !get().stopRequested) progress.failed++;
           }
 
           progress.done++;
